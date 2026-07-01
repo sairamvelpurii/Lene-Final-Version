@@ -579,11 +579,20 @@ def extract_text_from_file(path: Path, ext: str) -> str:
 
 def extract_multiple_transactions(text: str):
     """
-    Use Groq AI to detect if the text is a bank statement with multiple transactions.
-    If yes, extract all individual transactions. If no, return None.
+    Extract expense rows from a bank statement. Known statement layouts are parsed
+    locally first so uploads still work without Groq and are not limited by the
+    prompt length. Groq remains a fallback for unfamiliar layouts.
     """
+    local_transactions = extract_statement_transactions(text)
+    if len(local_transactions) > 1:
+        print(
+            f"[MULTI-TXN] Extracted {len(local_transactions)} transactions "
+            "with the local statement parser"
+        )
+        return local_transactions
+
     if not GROQ_API_KEY or GROQ_API_KEY == "YOUR_API_KEY_HERE":
-        return None  # Can't use AI, fall back to single-bill extraction
+        return None
 
     try:
         payload = {
@@ -682,6 +691,124 @@ def extract_multiple_transactions(text: str):
     except Exception as e:
         print(f"[MULTI-TXN] Error: {type(e).__name__}: {e}")
         return None
+
+
+def extract_statement_transactions(text: str):
+    """Parse common statement rows without sending financial text to an AI API."""
+    transactions = []
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+
+    # Layout used by statements whose transaction row contains a signed currency
+    # amount, for example: 05 Feb '26 UPI Debit-... -₹74.37 ₹866.27
+    signed_date = re.compile(r"^(\d{1,2}\s+[A-Za-z]{3}\s+'?\d{2,4})\s+(.+)$")
+    negative_amount = re.compile(r"-\s*[₹$]\s*([\d,]+(?:\.\d{1,2})?)")
+    for line in lines:
+        row = signed_date.match(line)
+        if not row:
+            continue
+
+        date_raw, details = row.groups()
+        amount_match = negative_amount.search(details)
+        debit_words = re.search(
+            r"\b(debit|withdrawal|purchase|payment|fee|charge)\b",
+            details,
+            flags=re.IGNORECASE,
+        )
+        if not amount_match or not debit_words:
+            continue
+
+        try:
+            txn_date = parse_statement_date(date_raw)
+            amount = float(amount_match.group(1).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        if amount <= 0:
+            continue
+
+        description = details[: amount_match.start()].strip(" -")
+        # Long numeric reference numbers are useful for reconciliation but make
+        # poor dashboard labels, so trim the description before them.
+        description = re.split(r"\s\d{10,}\b", description, maxsplit=1)[0].strip()
+        description = description[:180] or "Bank statement debit"
+        transactions.append(
+            {
+                "amount": amount,
+                "date": txn_date,
+                "description": description,
+                "category": infer_category(description),
+            }
+        )
+
+    if len(transactions) > 1:
+        return transactions
+
+    # Layout used by statements where UPI/DR or UPI/CR details appear on the
+    # lines before a dated row. The first decimal value is the transaction
+    # amount and the final value is the running balance.
+    transactions = []
+    numeric_date = re.compile(r"^(\d{2}-\d{2}-\d{4})\b(.*)$")
+    decimal_amount = re.compile(r"(?<!\d)(\d[\d,]*\.\d{1,2})(?!\d)")
+    pending = []
+
+    for line in lines:
+        row = numeric_date.match(line)
+        if not row:
+            pending.append(line)
+            continue
+
+        date_raw, values = row.groups()
+        marker_index = next(
+            (
+                index
+                for index in range(len(pending) - 1, -1, -1)
+                if re.search(
+                    r"/(?:DR|CR)/|\b(?:debit|credit|withdrawal|purchase)\b",
+                    pending[index],
+                    flags=re.IGNORECASE,
+                )
+            ),
+            None,
+        )
+        details = " ".join(pending[marker_index:]) if marker_index is not None else ""
+        pending = []
+
+        is_debit = bool(
+            re.search(r"/DR/|\b(?:debit|withdrawal|purchase)\b", details, re.IGNORECASE)
+        )
+        is_credit = bool(re.search(r"/CR/|\bcredit\b", details, re.IGNORECASE))
+        amounts = decimal_amount.findall(values)
+        if not is_debit or is_credit or len(amounts) < 2:
+            continue
+
+        try:
+            txn_date = datetime.strptime(date_raw, "%d-%m-%Y")
+            amount = float(amounts[0].replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        if amount <= 0:
+            continue
+
+        description = re.sub(r"\s+", " ", details).strip()[:180]
+        transactions.append(
+            {
+                "amount": amount,
+                "date": txn_date,
+                "description": description or "Bank statement debit",
+                "category": infer_category(description),
+            }
+        )
+
+    return transactions if len(transactions) > 1 else []
+
+
+def parse_statement_date(value: str):
+    """Parse the date formats currently produced by supported statements."""
+    for date_format in ("%d %b '%y", "%d %b %y", "%d %b %Y"):
+        try:
+            return datetime.strptime(value, date_format)
+        except ValueError:
+            continue
+    raise ValueError(f"Unsupported statement date: {value}")
 
 
 def extract_bill_data_from_text(text: str):
