@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply bg-surface-50 font-sans text-gray-800 antialiased transition-colors duration-300;
+  }
+
+  .dark body {
+    @apply bg-surface-950 text-gray-100;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-gray-300;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    @apply bg-gray-700;
+  }
+}
+
+@layer components {
+  /* Card system */
+  .card {
+    @apply rounded-2xl border border-surface-200 bg-white p-6 shadow-card transition-all duration-300;
+  }
+  .card:hover {
+    @apply shadow-card-hover;
+  }
+  .dark .card {
+    @apply border-surface-800/60 bg-surface-900;
+  }
+
+  /* Skeleton loader */
+  .skeleton {
+    @apply relative overflow-hidden rounded-xl bg-surface-200;
+    background: linear-gradient(90deg, #ebeef5 25%, #f4f6fb 50%, #ebeef5 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.8s infinite linear;
+  }
+  .dark .skeleton {
+    background: linear-gradient(90deg, #1e1b2e 25%, #2d2a3e 50%, #1e1b2e 75%);
+    background-size: 200% 100%;
+  }
+
+  /* Gradient text */
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, #4F46E5, #7C3AED);
+  }
+  .dark .text-gradient {
+    background-image: linear-gradient(135deg, #818CF8, #A78BFA);
+  }
+}
+
+/* Date picker icon */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.4);
+}
+.dark input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+}

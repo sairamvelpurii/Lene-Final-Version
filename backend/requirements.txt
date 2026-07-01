@@ -1,0 +1,15 @@
+flask
+flask-cors
+flask-jwt-extended
+pymongo
+python-dotenv
+werkzeug
+scikit-learn
+pandas
+numpy
+joblib
+pdfplumber
+pytesseract
+Pillow
+requests
+gunicorn

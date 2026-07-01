@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: ai-finance-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: MONGO_DB
+        value: ai_finance
+      - key: UPLOAD_DIR
+        value: /tmp/ai-finance-uploads
+      - key: ML_MODEL_PATH
+        value: ../ml/artifacts/expense_forecast.pkl
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: MONGO_URI
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+
