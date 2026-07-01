@@ -17,5 +17,4 @@ COPY ml ml
 
 WORKDIR /app/backend
 
-CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "2", "--timeout", "120", "app:create_app()"]
-
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "1", "--timeout", "120", "app:create_app()"]
