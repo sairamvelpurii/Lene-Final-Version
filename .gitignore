@@ -1,32 +1,38 @@
-# Environment files and secrets
-.env
-.env.*
-!.env.example
-backend/.env
-frontend/.env
-
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Virtual environments
 .venv/
 venv/
-backend/.venv/
-.pytest_cache/
+ENV/
 
-# JavaScript
-node_modules/
-frontend/node_modules/
-frontend/dist/
-npm-debug.log*
+# Environment variables (NEVER commit real secrets)
+.env
+!.env.example
 
-# Runtime files and user uploads
-uploads/
-backend/uploads/
-*.log
-
-# Editors and operating systems
-.vscode/
-.idea/
+# OS files
 .DS_Store
 Thumbs.db
 
+# IDE
+.vscode/
+.idea/
+
+# Uploads (runtime files, not source code)
+uploads/
+/tmp/
+
+# Python distribution
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+frontend/dist/
+
+# ML artifacts (large binary files — train locally)
+# Uncomment the line below if you don't want to track the model in git:
+# ml/artifacts/*.pkl

@@ -1,27 +1,32 @@
+# render.yaml — Render Blueprint for AI Finance Backend
+
 services:
   - type: web
-    name: ai-finance-api
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    healthCheckPath: /api/health
-    autoDeployTrigger: commit
+    name: ai-finance-backend
+    runtime: python
+    region: oregon
+    rootDir: backend
+    buildCommand: |
+      pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       - key: APP_ENV
         value: production
-      - key: MONGO_DB
-        value: ai_finance
-      - key: UPLOAD_DIR
-        value: /tmp/ai-finance-uploads
-      - key: ML_MODEL_PATH
-        value: ../ml/artifacts/expense_forecast.pkl
       - key: SECRET_KEY
         generateValue: true
       - key: JWT_SECRET_KEY
         generateValue: true
       - key: MONGO_URI
         sync: false
+      - key: MONGO_DB
+        value: ai_finance
       - key: FRONTEND_URL
         sync: false
+      - key: UPLOAD_DIR
+        value: /tmp/ai-finance-uploads
+      - key: ML_MODEL_PATH
+        value: ../ml/artifacts/expense_forecast.pkl
       - key: GROQ_API_KEY
         sync: false
-

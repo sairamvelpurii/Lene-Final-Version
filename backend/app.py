@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import joblib
@@ -12,7 +12,7 @@ import requests
 from PIL import Image
 from config import GROQ_API_KEY
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager,
@@ -41,26 +41,15 @@ CATEGORY_KEYWORDS = {
 
 def create_app():
     app = Flask(__name__)
-    app_env = os.getenv("APP_ENV", "development").lower()
     app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-secret")
-    app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "dev-jwt-secret")
+    app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "dev-jwt-secret-that-is-at-least-32-bytes-long")
     app.config["UPLOAD_DIR"] = os.getenv("UPLOAD_DIR", "uploads")
-    allowed_origins = [
-        origin.strip()
-        for origin in os.getenv("FRONTEND_URL", "http://localhost:5173").split(",")
-        if origin.strip()
-    ]
-    CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
+    frontend_url = os.getenv("FRONTEND_URL")
+    if frontend_url:
+        CORS(app, origins=[frontend_url])
+    else:
+        CORS(app)
     JWTManager(app)
-
-    if app_env == "production":
-        required = ["SECRET_KEY", "JWT_SECRET_KEY", "MONGO_URI", "FRONTEND_URL"]
-        missing = [name for name in required if not os.getenv(name)]
-        if missing:
-            raise RuntimeError(
-                "Missing required production environment variables: "
-                + ", ".join(missing)
-            )
 
     mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
     db_name = os.getenv("MONGO_DB", "ai_finance")
@@ -73,9 +62,7 @@ def create_app():
         db = client[db_name]
         users = db.users
         expenses = db.expenses
-    except Exception as exc:
-        if app_env == "production":
-            raise RuntimeError("Could not connect to MongoDB") from exc
+    except Exception:
         use_mongo = False
         users = None
         expenses = None
@@ -85,6 +72,13 @@ def create_app():
 
     model_path = Path(os.getenv("ML_MODEL_PATH", "../ml/artifacts/expense_forecast.pkl"))
     model = joblib.load(model_path) if model_path.exists() else None
+
+    @app.get("/")
+    def index():
+        return jsonify({
+            "message": "LENE Smart Tracker API is running! 🚀",
+            "documentation": "Endpoints are available at /api/..."
+        })
 
     @app.get("/api/health")
     def health():
@@ -105,7 +99,7 @@ def create_app():
             "name": name,
             "email": email,
             "password_hash": generate_password_hash(password),
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
         }
         create_user(users, mem_users, user_doc, use_mongo)
         token = create_access_token(identity=email, expires_delta=timedelta(days=1))
@@ -144,15 +138,23 @@ def create_app():
         note = data.get("note", "")
         if amount <= 0:
             return jsonify({"error": "Amount must be greater than zero"}), 400
-        exp_date = datetime.fromisoformat(date_raw) if date_raw else datetime.utcnow()
+        exp_date = datetime.fromisoformat(date_raw) if date_raw else datetime.now(timezone.utc)
         doc = {
             "user_email": email,
             "category": category,
             "amount": amount,
             "date": exp_date,
             "note": note,
-            "source": "manual",
-            "created_at": datetime.utcnow(),
+            "source": data.get("source", "manual"),
+            "type": data.get("type", "expense"),
+            "merchant": data.get("merchant", ""),
+            "currency": data.get("currency", "INR"),
+            "paymentMode": data.get("paymentMode", "Unknown"),
+            "receiptImage": data.get("receiptImage", ""),
+            "ocrText": data.get("ocrText", ""),
+            "confidenceScore": int(data.get("confidenceScore", 0)),
+            "items": data.get("items", []),
+            "created_at": datetime.now(timezone.utc),
         }
         create_expense(expenses, mem_expenses, doc, use_mongo)
         return jsonify({"message": "Expense added"}), 201
@@ -171,62 +173,71 @@ def create_app():
             return jsonify({"error": "Unsupported file type"}), 400
 
         filename = secure_filename(file.filename)
-        save_path = upload_dir / f"{datetime.utcnow().timestamp()}_{filename}"
+        save_path = upload_dir / f"{datetime.now(timezone.utc).timestamp()}_{filename}"
         file.save(save_path)
 
         # Extract text from file
         text = extract_text_from_file(save_path, ext)
+        print(f"[UPLOAD] Extracted {len(text)} chars from {ext} file: {filename}")
+        print(f"[UPLOAD] First 500 chars: {text[:500]}")
+
+        if not text or len(text.strip()) < 10:
+            return jsonify({
+                "error": "Could not extract text from the uploaded file. "
+                         "Please ensure the image/PDF is clear and contains readable text.",
+                "debug_text_length": len(text),
+            }), 400
 
         # Try to extract multiple transactions (bank statement)
         transactions = extract_multiple_transactions(text)
 
-        if transactions and len(transactions) > 1:
-            # Bank statement with multiple transactions
-            created_expenses = []
-            for txn in transactions:
-                doc = {
-                    "user_email": email,
-                    "category": txn.get("category", "Other"),
-                    "amount": txn["amount"],
-                    "date": txn.get("date", datetime.utcnow()),
-                    "note": txn.get("description", "Bank statement transaction"),
-                    "source": "bank_statement",
-                    "file_path": str(save_path),
-                    "created_at": datetime.utcnow(),
-                }
-                create_expense(expenses, mem_expenses, doc, use_mongo)
-                created_expenses.append(serialize_expense(doc))
+        if transactions and len(transactions) >= 1:
+            # Return the extracted transactions for user review
             return jsonify({
-                "message": f"Bank statement processed — {len(created_expenses)} transactions extracted",
-                "transaction_count": len(created_expenses),
-                "expenses": created_expenses,
-                "expense": created_expenses[0] if created_expenses else {},
-            }), 201
+                "message": "Extraction successful. Please review before saving.",
+                "transaction_count": len(transactions),
+                "expenses": transactions,
+                "file_path": filename,
+                "ocr_text": text
+            }), 200
         else:
-            # Single bill / receipt
+            # Groq failed or not available — regex fallback for single bill
+            print(f"[UPLOAD] Groq multi-txn returned None, falling back to regex")
             extracted = extract_bill_data_from_text(text)
-            doc = {
-                "user_email": email,
-                "category": extracted["category"],
-                "amount": extracted["amount"],
-                "date": extracted["date"],
-                "note": extracted["note"],
-                "source": "bill_upload",
-                "file_path": str(save_path),
-                "created_at": datetime.utcnow(),
-            }
-            create_expense(expenses, mem_expenses, doc, use_mongo)
+            
             return jsonify({
-                "message": "Bill processed",
+                "message": "Extraction successful. Please review before saving.",
                 "transaction_count": 1,
-                "expense": serialize_expense(doc),
-            }), 201
+                "expenses": [
+                    {
+                        "category": extracted["category"],
+                        "amount": extracted["amount"],
+                        "date": extracted["date"],
+                        "note": extracted["note"],
+                        "type": "expense",
+                        "merchant": "",
+                        "currency": "INR",
+                        "paymentMode": "Unknown",
+                        "confidenceScore": 50,
+                        "items": []
+                    }
+                ],
+                "file_path": filename,
+                "ocr_text": text
+            }), 200
+
+    @app.get("/api/uploads/<filename>")
+    def get_uploaded_file(filename):
+        return send_from_directory(app.config["UPLOAD_DIR"], filename)
 
     @app.get("/api/expenses")
     @jwt_required()
     def list_expenses():
         email = get_jwt_identity()
         user_expenses = fetch_user_expenses(expenses, mem_expenses, email, use_mongo, limit=500)
+        target_month = request.args.get("month")
+        if target_month and target_month != "all":
+            user_expenses = [e for e in user_expenses if e.get("date").strftime("%Y-%m") == target_month]
         return jsonify([serialize_expense(e) for e in user_expenses])
 
     @app.delete("/api/expenses/<expense_id>")
@@ -273,6 +284,7 @@ def create_app():
             return jsonify(
                 {
                     "total_spend": 0,
+                    "total_income": 0,
                     "by_category": {},
                     "monthly_trend": [],
                     "high_spend_categories": [],
@@ -280,20 +292,33 @@ def create_app():
             )
         by_category = {}
         by_month = {}
-        total = 0.0
+        total_spend = 0.0
+        total_income = 0.0
+        target_month = request.args.get("month")
         for exp in user_expenses:
             amount = float(exp["amount"])
-            total += amount
-            cat = exp.get("category", "Other")
-            by_category[cat] = by_category.get(cat, 0.0) + amount
+            exp_type = exp.get("type", "expense")
             month_key = exp["date"].strftime("%Y-%m")
-            by_month[month_key] = by_month.get(month_key, 0.0) + amount
+            
+            if exp_type == "expense":
+                by_month[month_key] = by_month.get(month_key, 0.0) + amount
+            
+            if target_month and target_month != "all" and month_key != target_month:
+                continue
+
+            if exp_type == "income":
+                total_income += amount
+            else:
+                total_spend += amount
+                cat = exp.get("category", "Other")
+                by_category[cat] = by_category.get(cat, 0.0) + amount
 
         sorted_cats = sorted(by_category.items(), key=lambda x: x[1], reverse=True)
         high_spend = [c for c, _ in sorted_cats[:3]]
         return jsonify(
             {
-                "total_spend": round(total, 2),
+                "total_spend": round(total_spend, 2),
+                "total_income": round(total_income, 2),
                 "by_category": {k: round(v, 2) for k, v in by_category.items()},
                 "monthly_trend": [
                     {"month": k, "amount": round(v, 2)}
@@ -376,7 +401,8 @@ def create_app():
             prev_month_total,
             rolling_3m,
         ]], dtype=float)
-        predicted = float(model.predict(features)[0]) if model is not None else month_values[-1]
+        predicted_ratio = float(model.predict(features)[0]) if model is not None else 1.0
+        predicted = latest_total * predicted_ratio if latest_total > 0 else month_values[-1]
         predicted = max(0, predicted)
 
         top_cats = sorted(category_totals.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -428,6 +454,10 @@ def create_app():
     @app.get("/api/admin/dashboard")
     def admin_dashboard():
         """Admin view to show all stored users and expenses in a visual HTML page."""
+        admin_key = os.getenv("ADMIN_KEY")
+        if admin_key and request.args.get("key") != admin_key:
+            return "Unauthorized", 401
+        
         # Fetch all users
         all_users = []
         if use_mongo:
@@ -562,68 +592,135 @@ def create_app():
 </html>"""
         return html, 200, {"Content-Type": "text/html"}
 
+    @app.post("/api/debug/ocr")
+    @jwt_required()
+    def debug_ocr():
+        """Debug endpoint to test OCR + Groq extraction without saving expenses."""
+        if "bill" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        file = request.files["bill"]
+        if not file.filename:
+            return jsonify({"error": "Invalid filename"}), 400
+        ext = file.filename.rsplit(".", 1)[-1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            return jsonify({"error": "Unsupported file type"}), 400
+
+        filename = secure_filename(file.filename)
+        save_path = upload_dir / f"debug_{datetime.now(timezone.utc).timestamp()}_{filename}"
+        file.save(save_path)
+
+        # Step 1: OCR
+        text = extract_text_from_file(save_path, ext)
+
+        # Step 2: Multi-transaction extraction
+        transactions = extract_multiple_transactions(text)
+
+        # Step 3: Single-bill fallback
+        single_bill = extract_bill_data_from_text(text)
+        if isinstance(single_bill.get("date"), datetime):
+            single_bill["date"] = single_bill["date"].isoformat()
+
+        # Cleanup
+        try:
+            save_path.unlink()
+        except Exception:
+            pass
+
+        return jsonify({
+            "ocr_text_length": len(text),
+            "ocr_text_preview": text[:2000],
+            "ocr_text_full": text,
+            "groq_api_key_set": bool(GROQ_API_KEY and GROQ_API_KEY != "YOUR_API_KEY_HERE"),
+            "multi_transactions": [
+                {"amount": t["amount"], "description": t.get("description"), "category": t.get("category"),
+                 "date": t["date"].isoformat() if isinstance(t.get("date"), datetime) else str(t.get("date", ""))}
+                for t in (transactions or [])
+            ],
+            "multi_transaction_count": len(transactions) if transactions else 0,
+            "single_bill_fallback": single_bill,
+        })
+
     return app
 
 
 def extract_text_from_file(path: Path, ext: str) -> str:
-    """Extract raw text from an image or PDF file."""
+    """Extract raw text from an image or PDF file.
+    
+    For PDFs: uses pdfplumber (pure Python, always works).
+    For images: tries pytesseract first, falls back gracefully if Tesseract
+    binary is not installed (common on Render/cloud deployments).
+    """
     text = ""
     if ext == "pdf":
-        with pdfplumber.open(path) as pdf:
-            for page in pdf.pages:
-                text += (page.extract_text() or "") + "\n"
+        try:
+            with pdfplumber.open(path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text() or ""
+                    text += page_text + "\n"
+                    # Also try extracting from tables if regular extraction is sparse
+                    if len(page_text.strip()) < 50:
+                        tables = page.extract_tables()
+                        for table in tables:
+                            for row in table:
+                                row_text = "  ".join(str(cell) for cell in row if cell)
+                                text += row_text + "\n"
+            print(f"[OCR] PDF extracted {len(text)} chars from {path.name}")
+        except Exception as e:
+            print(f"[OCR] PDF extraction error: {type(e).__name__}: {e}")
     else:
-        text = pytesseract.image_to_string(Image.open(path))
+        # Image file — try pytesseract
+        try:
+            img = Image.open(path)
+            text = pytesseract.image_to_string(img)
+            print(f"[OCR] Tesseract extracted {len(text)} chars from {path.name}")
+        except Exception as e:
+            print(f"[OCR] Tesseract failed ({type(e).__name__}: {e}), trying Groq vision fallback...")
+            # Fallback: use Groq to describe the image if pytesseract is unavailable
+            text = _ocr_image_via_groq(path)
     return text
 
 
-def extract_multiple_transactions(text: str):
+def _ocr_image_via_groq(path: Path) -> str:
+    """Fallback OCR: send the image to Groq and ask it to extract all visible text.
+    This works when Tesseract is not installed (e.g. on Render).
+    Uses base64 encoding to send the image inline.
     """
-    Extract expense rows from a bank statement. Known statement layouts are parsed
-    locally first so uploads still work without Groq and are not limited by the
-    prompt length. Groq remains a fallback for unfamiliar layouts.
-    """
-    local_transactions = extract_statement_transactions(text)
-    if len(local_transactions) > 1:
-        print(
-            f"[MULTI-TXN] Extracted {len(local_transactions)} transactions "
-            "with the local statement parser"
-        )
-        return local_transactions
-
     if not GROQ_API_KEY or GROQ_API_KEY == "YOUR_API_KEY_HERE":
-        return None
+        print("[OCR] No Groq API key available for image fallback")
+        return ""
 
     try:
+        import base64
+        with open(path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        # Determine MIME type
+        ext = path.suffix.lower().lstrip(".")
+        mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}
+        mime = mime_map.get(ext, "image/jpeg")
+
         payload = {
-            "model": "llama-3.3-70b-versatile",
+            "model": "llama-3.2-90b-vision-preview",
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "You are a financial document parser. Analyze the text and determine if it contains "
-                        "MULTIPLE financial transactions (like a bank statement, credit card statement, or "
-                        "transaction history) or just a SINGLE bill/receipt.\n\n"
-                        "If it contains MULTIPLE transactions (withdrawals, payments, debits), extract EACH "
-                        "transaction as a separate entry. Only extract EXPENSE transactions (withdrawals, "
-                        "debits, payments, purchases, fees). Do NOT include deposits, credits, or incoming transfers.\n\n"
-                        "Reply with ONLY a valid JSON array. Each object must have:\n"
-                        '- "date": the transaction date in "YYYY-MM-DD" format\n'
-                        '- "description": short description of what it was (e.g. "ATM Withdrawal", "Web Bill Payment - MASTERCARD")\n'
-                        '- "amount": the withdrawal/debit amount as a number (positive, no currency symbols)\n'
-                        '- "category": one of: Food, Travel, Bills, Entertainment, Healthcare, Shopping, Other\n\n'
-                        "If the document is a SINGLE bill/receipt (not a statement with multiple transactions), "
-                        'reply with exactly: []\n\n'
-                        "IMPORTANT: Reply with ONLY the JSON array, no markdown, no explanation, no code fences."
+                        "You are an OCR assistant. The user will provide an image of a bill, receipt, "
+                        "bank statement, or financial document. Extract ALL visible text from the image "
+                        "exactly as it appears — preserve numbers, dates, amounts, descriptions, and formatting. "
+                        "Do not summarize or interpret. Just output the raw text."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": f"Parse all expense transactions from this document:\n\n{text[:4000]}",
+                    "content": [
+                        {"type": "text", "text": "Extract all text from this financial document image:"},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}},
+                    ],
                 },
             ],
             "temperature": 0,
-            "max_tokens": 2000,
+            "max_tokens": 3000,
         }
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -635,41 +732,142 @@ def extract_multiple_transactions(text: str):
             timeout=30,
         )
         if response.status_code != 200:
-            print(f"[MULTI-TXN] Groq error {response.status_code}: {response.text[:200]}")
+            print(f"[OCR] Groq vision fallback error {response.status_code}: {response.text[:200]}")
+            return ""
+
+        text = response.json()["choices"][0]["message"]["content"].strip()
+        print(f"[OCR] Groq vision fallback extracted {len(text)} chars")
+        return text
+
+    except Exception as e:
+        print(f"[OCR] Groq vision fallback error: {type(e).__name__}: {e}")
+        return ""
+
+
+def extract_multiple_transactions(text: str):
+    """
+    Use Groq AI to extract ALL transactions from the document text.
+    Returns a list of transaction dicts, or None if Groq is unavailable/fails.
+    """
+    if not GROQ_API_KEY or GROQ_API_KEY == "YOUR_API_KEY_HERE":
+        print("[MULTI-TXN] No Groq API key, skipping AI extraction")
+        return None
+
+    if not text or len(text.strip()) < 10:
+        print("[MULTI-TXN] Text too short for extraction")
+        return None
+
+    try:
+        # Send up to 6000 chars (increased from 4000) — covers most statements
+        text_chunk = text[:6000]
+        print(f"[MULTI-TXN] Sending {len(text_chunk)} chars to Groq")
+
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a financial document parser. Your job is to extract EVERY individual "
+                        "transaction from the given text.\n\n"
+                        "The text may be from a bank statement, credit card statement, UPI history, "
+                        "bill, receipt, or any financial document.\n\n"
+                        "Extract EACH transaction as a separate entry. Intelligently differentiate "
+                        "between incomes (deposits, credits, additions, salary) and "
+                        "expenses (withdrawals, debits, deductions, payments, purchases).\n\n"
+                        "Reply with ONLY a valid JSON array. Each object must have:\n"
+                        '- "merchant": Name of the merchant or description (e.g. "Swiggy", "Salary")\n'
+                        '- "amount": The absolute positive amount (e.g., 1500.00)\n'
+                        '- "currency": Currency code (e.g., "INR", "USD")\n'
+                        '- "date": The transaction date in "YYYY-MM-DD" format (use today if not found)\n'
+                        '- "category": one of: Food, Travel, Bills, Entertainment, Healthcare, Shopping, Other (for expenses), or Salary, Refund, Investment, Other (for incomes)\n'
+                        '- "type": exactly "income" or "expense"\n'
+                        '- "paymentMode": e.g., "UPI", "Credit Card", "Cash", "Bank Transfer", "Unknown"\n'
+                        '- "items": array of strings (e.g., ["Pizza", "Coke"]) if applicable, else []\n'
+                        '- "confidenceScore": integer 0-100 indicating your confidence in this extraction\n\n'
+                        "If you cannot find ANY transaction data at all, reply with: []\n\n"
+                        "CRITICAL RULES:\n"
+                        "- Reply with ONLY the JSON array\n"
+                        "- No markdown code fences, no explanation, no extra text\n"
+                        "- Every transaction must be its own object in the array\n"
+                        "- Amount must be a plain positive number\n"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Extract every individual transaction from this document:\n\n{text_chunk}",
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 4000,
+        }
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=45,
+        )
+        if response.status_code != 200:
+            print(f"[MULTI-TXN] Groq error {response.status_code}: {response.text[:300]}")
             return None
 
         reply = response.json()["choices"][0]["message"]["content"].strip()
+        print(f"[MULTI-TXN] Groq raw reply ({len(reply)} chars): {reply[:500]}")
 
         # Clean up the reply — remove markdown code fences if present
-        if reply.startswith("```"):
-            reply = re.sub(r"^```(?:json)?\s*", "", reply)
-            reply = re.sub(r"\s*```$", "", reply)
+        cleaned = reply
+        if "```" in cleaned:
+            cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```", "", cleaned)
+            cleaned = cleaned.strip()
 
-        transactions_raw = json.loads(reply)
+        # Try to extract JSON array from the response even if there's extra text
+        # Find the first '[' and last ']'
+        start_idx = cleaned.find("[")
+        end_idx = cleaned.rfind("]")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            cleaned = cleaned[start_idx:end_idx + 1]
 
-        if not isinstance(transactions_raw, list) or len(transactions_raw) <= 1:
-            return None  # Not a multi-transaction document
+        transactions_raw = json.loads(cleaned)
+
+        if not isinstance(transactions_raw, list) or len(transactions_raw) == 0:
+            print("[MULTI-TXN] Groq returned empty array")
+            return None
 
         # Parse and validate each transaction
         transactions = []
         for txn in transactions_raw:
             try:
-                amount = float(txn.get("amount", 0))
+                # Handle amount — could be string or number
+                raw_amount = txn.get("amount", 0)
+                if isinstance(raw_amount, str):
+                    raw_amount = re.sub(r"[₹$€£,\s]", "", raw_amount)
+                amount = float(raw_amount)
                 if amount <= 0:
                     continue
 
                 # Parse date
                 date_str = txn.get("date", "")
-                try:
-                    txn_date = datetime.strptime(date_str, "%Y-%m-%d")
-                except (ValueError, TypeError):
-                    txn_date = datetime.utcnow()
+                txn_date = None
+                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y"):
+                    try:
+                        txn_date = datetime.strptime(date_str, fmt)
+                        break
+                    except (ValueError, TypeError):
+                        continue
+                if txn_date is None:
+                    txn_date = datetime.now(timezone.utc)
 
                 description = txn.get("description", "Transaction")
                 category = txn.get("category", "Other")
 
+                txn_type = txn.get("type", "expense")
+
                 # Validate category
-                valid_cats = {"Food", "Travel", "Bills", "Entertainment", "Healthcare", "Shopping", "Other"}
+                valid_cats = {"Food", "Travel", "Bills", "Entertainment", "Healthcare", "Shopping", "Salary", "Refund", "Investment", "Other"}
                 if category not in valid_cats:
                     category = infer_category(description)
 
@@ -678,143 +876,32 @@ def extract_multiple_transactions(text: str):
                     "date": txn_date,
                     "description": description,
                     "category": category,
+                    "type": txn_type,
                 })
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as te:
+                print(f"[MULTI-TXN] Skipping bad transaction: {te}")
                 continue
 
-        if len(transactions) > 1:
-            print(f"[MULTI-TXN] Extracted {len(transactions)} transactions from bank statement")
+        if len(transactions) >= 1:
+            print(f"[MULTI-TXN] ✅ Extracted {len(transactions)} transactions")
             return transactions
 
+        print("[MULTI-TXN] No valid transactions after validation")
         return None
 
+    except json.JSONDecodeError as e:
+        print(f"[MULTI-TXN] JSON parse error: {e}")
+        print(f"[MULTI-TXN] Raw reply was: {reply[:500] if 'reply' in locals() else 'N/A'}")
+        return None
     except Exception as e:
         print(f"[MULTI-TXN] Error: {type(e).__name__}: {e}")
         return None
 
 
-def extract_statement_transactions(text: str):
-    """Parse common statement rows without sending financial text to an AI API."""
-    transactions = []
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-
-    # Layout used by statements whose transaction row contains a signed currency
-    # amount, for example: 05 Feb '26 UPI Debit-... -₹74.37 ₹866.27
-    signed_date = re.compile(r"^(\d{1,2}\s+[A-Za-z]{3}\s+'?\d{2,4})\s+(.+)$")
-    negative_amount = re.compile(r"-\s*[₹$]\s*([\d,]+(?:\.\d{1,2})?)")
-    for line in lines:
-        row = signed_date.match(line)
-        if not row:
-            continue
-
-        date_raw, details = row.groups()
-        amount_match = negative_amount.search(details)
-        debit_words = re.search(
-            r"\b(debit|withdrawal|purchase|payment|fee|charge)\b",
-            details,
-            flags=re.IGNORECASE,
-        )
-        if not amount_match or not debit_words:
-            continue
-
-        try:
-            txn_date = parse_statement_date(date_raw)
-            amount = float(amount_match.group(1).replace(",", ""))
-        except (TypeError, ValueError):
-            continue
-        if amount <= 0:
-            continue
-
-        description = details[: amount_match.start()].strip(" -")
-        # Long numeric reference numbers are useful for reconciliation but make
-        # poor dashboard labels, so trim the description before them.
-        description = re.split(r"\s\d{10,}\b", description, maxsplit=1)[0].strip()
-        description = description[:180] or "Bank statement debit"
-        transactions.append(
-            {
-                "amount": amount,
-                "date": txn_date,
-                "description": description,
-                "category": infer_category(description),
-            }
-        )
-
-    if len(transactions) > 1:
-        return transactions
-
-    # Layout used by statements where UPI/DR or UPI/CR details appear on the
-    # lines before a dated row. The first decimal value is the transaction
-    # amount and the final value is the running balance.
-    transactions = []
-    numeric_date = re.compile(r"^(\d{2}-\d{2}-\d{4})\b(.*)$")
-    decimal_amount = re.compile(r"(?<!\d)(\d[\d,]*\.\d{1,2})(?!\d)")
-    pending = []
-
-    for line in lines:
-        row = numeric_date.match(line)
-        if not row:
-            pending.append(line)
-            continue
-
-        date_raw, values = row.groups()
-        marker_index = next(
-            (
-                index
-                for index in range(len(pending) - 1, -1, -1)
-                if re.search(
-                    r"/(?:DR|CR)/|\b(?:debit|credit|withdrawal|purchase)\b",
-                    pending[index],
-                    flags=re.IGNORECASE,
-                )
-            ),
-            None,
-        )
-        details = " ".join(pending[marker_index:]) if marker_index is not None else ""
-        pending = []
-
-        is_debit = bool(
-            re.search(r"/DR/|\b(?:debit|withdrawal|purchase)\b", details, re.IGNORECASE)
-        )
-        is_credit = bool(re.search(r"/CR/|\bcredit\b", details, re.IGNORECASE))
-        amounts = decimal_amount.findall(values)
-        if not is_debit or is_credit or len(amounts) < 2:
-            continue
-
-        try:
-            txn_date = datetime.strptime(date_raw, "%d-%m-%Y")
-            amount = float(amounts[0].replace(",", ""))
-        except (TypeError, ValueError):
-            continue
-        if amount <= 0:
-            continue
-
-        description = re.sub(r"\s+", " ", details).strip()[:180]
-        transactions.append(
-            {
-                "amount": amount,
-                "date": txn_date,
-                "description": description or "Bank statement debit",
-                "category": infer_category(description),
-            }
-        )
-
-    return transactions if len(transactions) > 1 else []
-
-
-def parse_statement_date(value: str):
-    """Parse the date formats currently produced by supported statements."""
-    for date_format in ("%d %b '%y", "%d %b %y", "%d %b %Y"):
-        try:
-            return datetime.strptime(value, date_format)
-        except ValueError:
-            continue
-    raise ValueError(f"Unsupported statement date: {value}")
-
-
 def extract_bill_data_from_text(text: str):
     """Extract a single bill's data from pre-extracted text."""
     amount = extract_amount_with_ai(text)
-    date = extract_date(text) or datetime.utcnow()
+    date = extract_date(text) or datetime.now(timezone.utc)
     category = infer_category(text)
     return {
         "amount": amount,
@@ -1007,7 +1094,7 @@ def fetch_user_expenses(expenses, mem_expenses: list, email: str, use_mongo: boo
         query = expenses.find({"user_email": email}).sort("date", -1)
         return list(query.limit(limit)) if limit else list(query)
     data = [e for e in mem_expenses if e.get("user_email") == email]
-    data.sort(key=lambda x: x.get("date", datetime.utcnow()), reverse=True)
+    data.sort(key=lambda x: x.get("date", datetime.now(timezone.utc)), reverse=True)
     return data[:limit] if limit else data
 
 
@@ -1020,7 +1107,7 @@ def build_finance_context(user_expenses: list):
         amount = float(item.get("amount", 0))
         category = item.get("category", "Other")
         totals[category] = totals.get(category, 0) + amount
-        month = item.get("date", datetime.utcnow()).strftime("%Y-%m")
+        month = item.get("date", datetime.now(timezone.utc)).strftime("%Y-%m")
         monthly[month] = monthly.get(month, 0) + amount
     top = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:4]
     return (
@@ -1087,3 +1174,6 @@ def ask_groq(message: str, finance_context: str):
 if __name__ == "__main__":
     app = create_app()
     app.run(host="0.0.0.0", port=5000, debug=True)
+else:
+    # For gunicorn / production WSGI servers: `gunicorn app:app`
+    app = create_app()

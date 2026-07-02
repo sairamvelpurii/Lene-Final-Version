@@ -97,6 +97,9 @@ def load_and_prepare_data():
 
     # Drop first row (no lag available)
     monthly_df = monthly_df.dropna().reset_index(drop=True)
+    monthly_df["next_month_total"] = monthly_df["monthly_total"].shift(-1)
+    monthly_df = monthly_df.dropna(subset=["next_month_total"]).reset_index(drop=True)
+    monthly_df["target_ratio"] = monthly_df["next_month_total"] / monthly_df["monthly_total"]
 
     print("Monthly aggregated features:")
     print(monthly_df.to_string(index=False))
@@ -136,6 +139,9 @@ def augment_data(monthly_df, n_augmented=150):
             "rolling_3m_avg": base["rolling_3m_avg"] * noise_factor,
             "monthly_total": base["monthly_total"] * noise_factor,
         }
+        # Compute ratio target for augmented data too based on base next month
+        base_next = base["next_month_total"] * noise_factor if "next_month_total" in base else base["monthly_total"] * noise_factor
+        row["target_ratio"] = (base_next / row["monthly_total"]) if row["monthly_total"] > 0 else 1.0
         augmented_rows.append(row)
 
     augmented_df = pd.DataFrame(augmented_rows)
@@ -163,7 +169,7 @@ def train_model(df):
     ]
 
     X = df[feature_cols].values
-    y = df["monthly_total"].values
+    y = df["target_ratio"].values
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42

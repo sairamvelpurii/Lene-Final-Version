@@ -1,6 +1,5 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  darkMode: "class",
   content: ["./index.html", "./src/**/*.{js,jsx,ts,tsx}"],
   theme: {
     extend: {
@@ -9,32 +8,27 @@ export default {
       },
       colors: {
         brand: {
-          50:  "#EEF2FF",
-          100: "#E0E7FF",
-          200: "#C7D2FE",
-          300: "#A5B4FC",
-          400: "#818CF8",
-          500: "#6366F1",
-          600: "#4F46E5",
-          700: "#4338CA",
-          800: "#3730A3",
-          900: "#312E81",
+          50:  "#ECFDF5",
+          100: "#D1FAE5",
+          200: "#A7F3D0",
+          300: "#6EE7B7",
+          400: "#34D399",
+          500: "#10B981",
+          600: "#059669",
+          700: "#047857",
         },
         surface: {
-          50:  "#FAFBFF",
-          100: "#F4F6FB",
-          200: "#EBEEF5",
-          300: "#E2E5ED",
-          800: "#1E1B2E",
-          900: "#141122",
-          950: "#0F0D1A",
+          50:  "#F9FAFB",
+          100: "#F3F4F6",
+          200: "#E5E7EB", // Borders
+          300: "#D1D5DB",
         },
       },
       boxShadow: {
         soft:    "0 1px 3px rgba(0,0,0,0.04), 0 6px 24px rgba(0,0,0,0.06)",
-        card:    "0 2px 8px rgba(99,102,241,0.06), 0 8px 32px rgba(0,0,0,0.04)",
-        "card-hover": "0 8px 24px rgba(99,102,241,0.12), 0 12px 36px rgba(0,0,0,0.06)",
-        glow:    "0 0 20px rgba(99,102,241,0.15)",
+        card:    "0 2px 8px rgba(16,185,129,0.06), 0 8px 32px rgba(0,0,0,0.04)",
+        "card-hover": "0 8px 24px rgba(16,185,129,0.12), 0 12px 36px rgba(0,0,0,0.06)",
+        glow:    "0 0 20px rgba(16,185,129,0.15)",
       },
       borderRadius: {
         "2xl": "16px",
